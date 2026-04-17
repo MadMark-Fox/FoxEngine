@@ -6,7 +6,7 @@ import threading
 from flask import Flask, request
 
 # --- CONFIGURACIÓN ---
-TELEGRAM_TOKEN = "8662170668:AAEJQI6I_4HxgjkvNVRPdk0PKZjYigm3RXw"
+TELEGRAM_TOKEN = "[SECRET]"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "experto-linux"
 
