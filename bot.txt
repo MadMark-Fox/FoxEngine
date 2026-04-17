@@ -1,0 +1,164 @@
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import subprocess
+import requests
+import threading
+from flask import Flask, request
+
+# --- CONFIGURACIÓN ---
+TELEGRAM_TOKEN = "8662170668:AAEJQI6I_4HxgjkvNVRPdk0PKZjYigm3RXw"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = "experto-linux"
+
+# ID de Telegram autorizado
+TU_CHAT_ID = "6634448380" 
+
+# Diccionario de servidores
+# FoxEngine se marca como 'local' para evitar SSH
+SERVIDORES = {
+    "FoxEngine": "local",
+    "Jhonny": "cliente@192.168.1.103",
+    "MotherBase": "usuario@172.19.100.47",
+    "Tanker": "usuario@172.19.100.32"
+}
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+app_flask = Flask(__name__)
+
+# --- VARIABLES DE ESTADO ---
+comando_pendiente = ""
+servidor_seleccionado = "FoxEngine"
+CONTEXTO_GRAL = "Eres un administrador de sistemas jefe. Respuestas breves y técnicas."
+
+# --- FUNCIONES DE APOYO ---
+
+def query_ollama(prompt, system_prompt=""):
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "system": system_prompt,
+        "stream": False
+    }
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=40)
+        return response.json().get("response", "").strip()
+    except Exception as e:
+        return f"Error de conexión con Ollama: {e}"
+
+def clean_command(text):
+    text = text.replace("```bash", "").replace("```sh", "").replace("```", "")
+    return text.strip().split('\n')[0]
+
+def es_usuario_autorizado(message):
+    id_usuario = str(message.chat.id)
+    if id_usuario != TU_CHAT_ID:
+        print(f"⚠️ Acceso denegado: {id_usuario}")
+        bot.reply_to(message, "❌ No autorizado.")
+        return False
+    return True
+
+# --- RUTAS DE FLASK ---
+
+@app_flask.route('/alerta', methods=['POST'])
+def recibir_alerta():
+    data = request.json
+    alertas = data.get('alerts', [])
+    for alerta in alertas:
+        nombre = alerta['labels'].get('alertname', 'desconocida')
+        instancia = alerta['labels'].get('instance', '?')
+        prompt_auto = f"Alerta: {nombre} en {instancia}. Comando Linux para arreglarlo:"
+        comando_sugerido = clean_command(query_ollama(prompt_auto, "Solo comando Linux."))
+        
+        mensaje = (f"🚨 **ALERTA**\nEvento: `{nombre}`\nInstancia: `{instancia}`\n\n"
+                   f"🛠️ **Sugerencia:** `/haz {comando_sugerido}`")
+        bot.send_message(TU_CHAT_ID, mensaje, parse_mode="Markdown")
+    return "OK", 200
+
+# --- MANEJADORES DE TELEGRAM ---
+
+@bot.message_handler(commands=['start', 'server'])
+def menu_servidores(message):
+    if not es_usuario_autorizado(message): return
+    markup = InlineKeyboardMarkup()
+    for nombre in SERVIDORES.keys():
+        markup.add(InlineKeyboardButton(f"🖥️ {nombre}", callback_data=f"set_srv_{nombre}"))
+    bot.send_message(message.chat.id, f"📍 **Actual:** `{servidor_seleccionado}`\nSelecciona objetivo:", 
+                     parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(commands=['estado'])
+def ver_estado(message):
+    if not es_usuario_autorizado(message): return
+    target = SERVIDORES.get(servidor_seleccionado)
+    bot.send_chat_action(message.chat.id, 'typing')
+    
+    try:
+        if target == "local":
+            salida = subprocess.check_output(['uptime'], text=True)
+        else:
+            salida = subprocess.check_output(f"ssh -o ConnectTimeout=5 {target} 'uptime'", shell=True, text=True)
+        bot.reply_to(message, f"📊 **Estado {servidor_seleccionado}:**\n`{salida}`", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error:\n`{e}`")
+
+@bot.message_handler(commands=['haz'])
+def solicitar_confirmacion(message):
+    if not es_usuario_autorizado(message): return
+    global comando_pendiente
+    peticion = message.text.replace("/haz ", "")
+    if not peticion or peticion == "/haz":
+        bot.reply_to(message, "⚠️ Uso: `/haz <accion>`")
+        return
+
+    raw_response = query_ollama(peticion, "Responde solo con el comando Bash.")
+    comando_pendiente = clean_command(raw_response)
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ EJECUTAR", callback_data="run_confirmed"),
+               InlineKeyboardButton("❌ CANCELAR", callback_data="run_cancel"))
+
+    bot.reply_to(message, f"🛡️ **CONFIRMACIÓN ({servidor_seleccionado})**\n`{comando_pendiente}`", 
+                 parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    global comando_pendiente, servidor_seleccionado
+    
+    if call.data.startswith("set_srv_"):
+        servidor_seleccionado = call.data.replace("set_srv_", "")
+        bot.edit_message_text(f"✅ Objetivo: **{servidor_seleccionado}**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+    elif call.data == "run_confirmed":
+        target = SERVIDORES.get(servidor_seleccionado)
+        bot.edit_message_text(f"⚙️ Procesando en `{servidor_seleccionado}`...", call.message.chat.id, call.message.message_id)
+        
+        try:
+            # LÓGICA LOCAL VS REMOTA
+            if target == "local":
+                comando_final = f"sudo {comando_pendiente}"
+            else:
+                comando_final = f"ssh -o ConnectTimeout=10 {target} 'sudo {comando_pendiente}'"
+            
+            resultado = subprocess.run(comando_final, shell=True, capture_output=True, text=True, timeout=40)
+            salida, error = resultado.stdout.strip(), resultado.stderr.strip()
+            
+            res_msg = f"🖥️ **Nodo:** `{servidor_seleccionado}`\n"
+            if salida: res_msg += f"```\n{salida}\n```"
+            if error: res_msg += f"\n⚠️ **Info/Error:**\n`{error}`"
+            bot.send_message(call.message.chat.id, res_msg or "✅ OK", parse_mode="Markdown")
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ Fallo: {e}")
+
+    elif call.data == "run_cancel":
+        bot.edit_message_text("🚫 Cancelado.", call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(func=lambda message: True)
+def responder_chat(message):
+    if not es_usuario_autorizado(message): return
+    bot.send_chat_action(message.chat.id, 'typing')
+    respuesta = query_ollama(message.text, CONTEXTO_GRAL)
+    bot.reply_to(message, f"🤖 **[{servidor_seleccionado}]**:\n{respuesta}", parse_mode="Markdown")
+
+if __name__ == "__main__":
+    threading.Thread(target=lambda: app_flask.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
+    print(f"🚀 FoxEngine Listo | ID: {TU_CHAT_ID}")
+    bot.polling(none_stop=True)
