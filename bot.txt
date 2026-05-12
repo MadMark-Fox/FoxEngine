@@ -11,7 +11,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "experto-linux"
 
 # ID de Telegram autorizado
-TU_CHAT_ID = "6634448380" 
+TU_CHAT_ID = "ID_DE_TELEGRAM" 
 
 # Diccionario de servidores
 # FoxEngine se marca como 'local' para evitar SSH
