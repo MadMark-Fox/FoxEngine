@@ -110,7 +110,7 @@ docker stack deploy -c docker-compose.yml monitor
 
 ---
 
-## 🌱 Plant — Servicios IT
+## 🏗️ Plant — Servicios IT
 
 Nodo worker orientado a herramientas de soporte empresarial:
 
@@ -122,7 +122,7 @@ Nodo worker orientado a herramientas de soporte empresarial:
 
 ---
 
-## ⚓ Tanker — Frontend y Documentación
+## ⛴️ Tanker — Frontend y Documentación
 
 Nodo worker orientado al acceso unificado y la gestión del conocimiento:
 
